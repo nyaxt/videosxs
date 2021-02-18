@@ -2,6 +2,8 @@
 
 VideoSXS is a simple HTML5 based tool that you can use to compare page load video capture taken from Chrome on Android.
 
+![sample scerenshot](https://github.com/nyaxt/videosxs/blob/main/doc/screenshot.png?raw=true)
+
 ## Usage
 
 VideoSXS takes a [catapult/telemetry](https://chromium.googlesource.com/catapult/+/HEAD/telemetry/README.md) benchmark output, and you can compare visual loading experience across different runs.
