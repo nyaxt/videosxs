@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<body>
+<select id='labels'></select><button type=button id=add_view>add view</button>
+<br>
+<br>
+<button type=button id=step_back>-1 frame</button>
+<button type=button id=reset>jmp navStart</button>
+<button type=button id=play>play</button>
+<button type=button id=pause>pause</button>
+<button type=button id=step_fwd>+1 frame</button>
+<br>
+<select class='playbackspeed'>
+  <option value="0.2">5x slow</option>
+  <option value="0.5">2x slow</option>
+  <option value="1">1x</option>
+</select>
+<input type="number" min=0 max=8 step=0.1 class='refFrameTimestamp' value='4.0'></input>
+<div id='views'></div>
+<br>
+<canvas id=debug width=512 height=512></canvas><button type=button id=copyimg>copyimg</button>
+<template id=view>
+  <div class=view>
+    <div class=close>✗</div>
+    <h2 class=label></h2>
+    <select class='stories'></select>
+    <select class=run></select><br>
+    <div class=status>not initialized</div>
+    <video controls></video>
+    <div class=controls>⊿navStart: <span class=delta_navstart>X.X</span> <a class='trace_html' href="#">trace.html</a></div>
+    <canvas></canvas>
+  </div>
+</template>
+<style>
+  h2 {
+    margin-block-start: 0;
+  }
+
+  select {
+    padding: 0.5em;
+  }
+
+  #views {
+    display: flex;
+    flex-direction: row;
+  }
+
+  .view {
+    position: relative;
+    border: 1px solid #999;
+    padding: 10px;
+    margin: 5px;
+  }
+
+  .close {
+    position: absolute;
+    border: 1px solid black;
+    background-color:  white;
+    padding: 0.2em;
+    right: 10px;
+  }
+
+  .status {
+    margin: 0.5em 0;
+    font-family: monospace;
+  }
+
+  .controls {
+    margin: 0.5em 0;
+    font-family: monospace;
+  }
+
+  .view video {
+    margin-top: 10px;
+    height: 720px;
+    width: 360px;
+  }
+
+  .view canvas {
+    display: none;
+  }
+
+  canvas {
+    margin-top: 10px;
+    border: 1px solid black;
+  }
+</style>
+<script type=module>
+const $ = document.querySelector.bind(document);
+window.CROP_X = 292;
+window.CROP_Y = 157;
+window.CROP_W = 330;
+window.CROP_H = 70;
+window.CROP_SCALE = 0.25;
+
+let views = [];
+
+const debugC = $('#debug');
+debugC.width = CROP_W * CROP_SCALE;
+debugC.height = CROP_H * CROP_SCALE;
+const debugCtx = debugC.getContext('2d');
+
+const refFrameImage = new Image();
+refFrameImage.src = '/ref.png';
+
+function frameDiff(a, b) {
+  const pa = a.data;
+  const pb = b.data;
+
+  let d = 0.0;
+  for (let y = 0; y < a.height; y++) {
+    for (let x = 0; x < a.width; x++) {
+      const ra = pa[(y*a.width + x)*4 + 0];
+      const ga = pa[(y*a.width + x)*4 + 1];
+      const ba = pa[(y*a.width + x)*4 + 2];
+      const rb = pb[(y*a.width + x)*4 + 0];
+      const gb = pb[(y*a.width + x)*4 + 1];
+      const bb = pb[(y*a.width + x)*4 + 2];
+
+      d += (ra-rb)*(ra-rb) + (ga-gb)*(ga-gb) + (ba-bb)*(ba-bb);
+    }
+  }
+  d /= a.height * a.width * 255 * 255;
+
+  return d;
+}
+
+function currentPlaybackSpeed() {
+  return parseFloat($('.playbackspeed').value);
+}
+
+function getRefFrameTime() {
+  return parseFloat($('.refFrameTimestamp').value);
+}
+
+function updateHash() {
+  const specs = views.map(view => [view.label, view.story.name, view.runIdx].join(':'));
+
+  const hash = '#' + specs.join(";");
+  window.history.replaceState(null, '', hash);
+}
+
+const viewTemplate = $("template#view").content;
+const viewsDiv = $('#views');
+
+async function addView(label, storyName = null, run = 0) {
+  const info = await fetch(`/api/info/${label}`).then(resp => resp.json());
+
+  info.stories.sort((a,b) => {
+    if (a.name < b.name) return -1;
+    if (a.name > b.name) return 1;
+    return 0;
+  });
+
+  const viewDoc = viewTemplate.cloneNode(/* deep=*/true);
+  const view = viewsDiv.appendChild(viewDoc.children[0]);
+  views.push(view);
+
+  view.label = label;
+
+  const status = view.querySelector('.status');
+  view.querySelector('.close').addEventListener('click', () => {
+    views = views.filter(v => v !== view);
+    viewsDiv.removeChild(view);
+    updateHash();
+  });
+  const delta_navstart = view.querySelector('.delta_navstart');
+  const storiesSel = view.querySelector('.stories');
+
+  view.querySelector('.label').innerText = label;
+  const video = view.querySelector('video');
+  video.addEventListener('timeupdate', () => {
+    if (view.navStart === undefined) {
+      return;
+    }
+
+    const d = video.currentTime - view.navStart;
+    delta_navstart.innerText = d.toFixed(3);
+  });
+
+  view.play = async () => {
+    video.playbackRate = currentPlaybackSpeed();
+    await video.play();
+  };
+  view.pause = async () => { await video.pause(); };
+
+  const canvas = view.querySelector('canvas');
+  canvas.width = CROP_W * CROP_SCALE;
+  canvas.height = CROP_H * CROP_SCALE;
+  view.seek = async(time) => {
+    const seekedPromise = new Promise((resolve) => {
+      video.addEventListener('seeked', () => resolve(), {once: true});
+    });
+    video.currentTime = time;
+    await seekedPromise;
+  };
+  view.seekNSRel = async(t) => { await view.seek(t + view.navStart); };
+  view.NSRel = () => video.currentTime - view.navStart;
+  view.grabFrame = async (time) => {
+    await view.seek(time);
+
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(video, CROP_X, CROP_Y, CROP_W, CROP_H, 0, 0, canvas.width, canvas.height);
+    return ctx.getImageData(0, 0, canvas.width, canvas.height);
+  };
+  view.findNavStart = async () => {
+    let refFrame;
+    const eps_d = 0.03;
+    const stride = 1.50; // strides to scan before going bisect
+
+    let start = 0.0;
+    if (refFrameImage !== null) {
+      console.log("using reference png");
+      while (!refFrameImage.complete) {
+        console.log("waiting for load");
+        await new Promise(resolve => {
+          refFrameImage.addEventListener('load', () => resolve());
+        });
+        console.log("load complete!");
+      }
+
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(refFrameImage, 0, 0);
+      refFrame = ctx.getImageData(0, 0, canvas.width, canvas.height);
+
+      for (; start < 10.0; start += stride) {
+        const frame = await view.grabFrame(start);
+        const d = frameDiff(refFrame, frame);
+        console.log(`start ${start} d ${d}`);
+        if (d < eps_d)
+          break;
+      }
+    } else {
+      const refFrameTime = getRefFrameTime();
+      start = refFrameTime;
+      refFrame = await view.grabFrame(refFrameTime);
+    }
+    debugCtx.putImageData(refFrame, 0, 0);
+
+    let end = start;
+    for (; end < 30.0; end += stride) {
+      const frame = await view.grabFrame(end);
+      const d = frameDiff(refFrame, frame);
+      console.log(`end ${end} d ${d}`);
+      if (d > eps_d)
+        break;
+    }
+
+    const eps_t = 0.01;
+    while (end - start > eps_t) {
+      const mid = start + (end-start)/2;
+      const frame = await view.grabFrame(mid);
+      const d = frameDiff(refFrame, frame);
+      status.innerText = "t: " +mid+" diff: " + d;
+      if (d > eps_d) {
+        console.log(`start ${start} mid ${mid}`);
+        end = mid;
+      } else {
+        console.log(`mid ${mid} end ${end}`);
+        start = mid;
+      }
+    }
+    view.navStart = start;
+    await view.seek(view.navStart);
+    status.innerText = "found navstart: " + start;
+  };
+
+  const runSel = view.querySelector('.run');
+  const traceHtmlA = view.querySelector('.trace_html');
+  const loadSelectedVideo = async () => {
+    view.runIdx = parseInt(runSel.value);
+
+    const run = view.story.runs[view.runIdx];
+
+    const canplayPromise = new Promise((resolve) => {
+      video.addEventListener('canplay', () => resolve(), {once: true});
+    })
+    video.src = run.recording_path;
+    video.load();
+
+    traceHtmlA.href = run.trace_html_path;
+
+    updateHash();
+
+    status.innerText = 'loading video';
+    await canplayPromise;
+    status.innerText = 'video load complete';
+
+    await view.findNavStart();
+  };
+  runSel.addEventListener('change', loadSelectedVideo);
+
+  view.loadStory = async (storyName, runidx = -1) => {
+    if (view.story && view.story.name === storyName) {
+      return;
+    }
+
+    view.story = null;
+    for (const story of info.stories) {
+      if (story.name == storyName) {
+        view.story = story;
+        break
+      }
+    }
+    if (view.story === null) return;
+    storiesSel.value = storyName;
+
+    const runs = view.story.runs;
+
+    if (runidx < 0) {
+      runidx = (runSel.value != "") ? parseInt(runSel.value) : 0;
+    }
+
+    runSel.innerHTML = '';
+    for (const i in runs) {
+      const opt = document.createElement('option');
+      opt.value = i;
+      opt.innerText = i;
+
+      runSel.appendChild(opt);
+    }
+
+    runSel.value = runidx;
+    loadSelectedVideo();
+  };
+
+  for (const i in info.stories) {
+    const story = info.stories[i];
+
+    const opt = document.createElement('option');
+    opt.value = story.name;
+    opt.innerText = story.name;
+    storiesSel.appendChild(opt);
+  }
+  const updateStoryToSelection = () => {
+    const storyName = storiesSel.value;
+
+    for (const view of views) {
+      view.loadStory(storyName, -1);
+    }
+  };
+  storiesSel.addEventListener("change", updateStoryToSelection);
+  if (storyName !== null) {
+    await view.loadStory(storyName, run);
+  } else {
+    updateStoryToSelection();
+  }
+
+  return view;
+}
+
+const step_delta = 0.05;
+function step(d) {
+  let dns = -1;
+  for (const view of views) {
+    if (dns < 0) dns = view.NSRel();
+
+    view.seekNSRel(dns + d);
+  }
+}
+$('#step_back').addEventListener('click', () => {
+  step(-step_delta);
+});
+$('#step_fwd').addEventListener('click', () => {
+  step(+step_delta);
+});
+$('#reset').addEventListener('click', () => {
+  for (const view of views) {
+    view.pause();
+    view.seekNSRel(0.0);
+  }
+});
+$('#play').addEventListener("click", () => {
+  for (const view of views) {
+    view.play();
+  }
+})
+$('#pause').addEventListener("click", () => {
+  for (const view of views) {
+    view.pause();
+  }
+})
+const copyimgBtn = $('#copyimg');
+copyimgBtn.addEventListener("click", () => {
+  const dataURL = debugC.toDataURL("image/png");
+  const img = new Image();
+  img.src = dataURL;
+  copyimgBtn.parentNode.insertBefore(img, copyimgBtn);
+})
+
+async function main() {
+  const labels = await fetch('/api/labels').then(resp => resp.json());
+
+  const labelsSel = $('select#labels');
+  for (const label of labels) {
+    const opt = document.createElement('option');
+    opt.value = label;
+    opt.innerText = label;
+
+    labelsSel.appendChild(opt);
+  }
+  $('#add_view').addEventListener("click", () => {
+    let storyName = null, run = 0;
+    if (views.length != 0) {
+      const lastView = views[views.length-1];
+      storyName = lastView.story.name;
+      run = lastView.runIdx;
+    }
+    addView(labelsSel.value, storyName, run);
+  });
+
+  let h = (window.location.hash || '#').substring('#'.length);
+  for (const spec of h.split(';')) {
+    let label, storyName, run;
+    [label, storyName, run] = spec.split(':');
+    if (label === '')
+      continue;
+
+    const view = await addView(label, storyName, parseInt(run));
+  }
+}
+main();
+</script>
+<!--
+x: <input type="range" min=10 max=1000 onchange="window.CROP_X = parseInt(event.target.value); findNavStart();">
+y: <input type="range" min=10 max=1000 onchange="window.CROP_Y = parseInt(event.target.value); findNavStart();">
+w: <input type="range" min=10 max=1000 onchange="window.CROP_W = parseInt(event.target.value); findNavStart();">
+h: <input type="range" min=10 max=1000 onchange="window.CROP_H = parseInt(event.target.value); findNavStart();">
+-->
